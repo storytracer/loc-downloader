@@ -1,9 +1,11 @@
 from typing import List, Optional, Dict, Any, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from datetime import datetime
 
 
 class FileInfo(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    
     url: Optional[str] = None
     mimetype: Optional[str] = None
     size: Optional[int] = None
@@ -12,6 +14,8 @@ class FileInfo(BaseModel):
     
     
 class Resource(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    
     url: str
     files: List[List[FileInfo]] = Field(default_factory=list)
     caption: Optional[str] = None
@@ -20,6 +24,8 @@ class Resource(BaseModel):
     
     
 class Pagination(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    
     from_: int = Field(alias="from")
     to: int
     total: int
@@ -30,6 +36,8 @@ class Pagination(BaseModel):
     
     
 class SearchResult(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    
     id: str
     title: Optional[str] = None
     date: Optional[str] = None
@@ -39,6 +47,8 @@ class SearchResult(BaseModel):
     
     
 class Item(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    
     id: str
     title: str
     date: Optional[str] = None
@@ -72,18 +82,24 @@ class Item(BaseModel):
     
     
 class ItemResponse(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    
     item: Item
     resources: List[Resource] = Field(default_factory=list)
     cite_this: Optional[Dict[str, Any]] = None
     
     
 class SearchResponse(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    
     results: List[SearchResult]
     pagination: Pagination
     facets: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     
     
 class Collection(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    
     id: str
     title: str
     description: Optional[str] = None

@@ -27,9 +27,9 @@ def main():
     print()
     
     # Example 4: Save metadata
-    print("Example 4: Saving metadata to JSON")
-    api.save_metadata(item, "metadata/item_metadata.json")
-    api.save_metadata(items, "metadata/collection_metadata.json")
+    print("Example 4: Saving metadata to JSONL")
+    api.save_metadata(item, "metadata/item_metadata.jsonl")
+    api.save_metadata(items, "metadata/collection_metadata.jsonl")
     print("Metadata saved successfully")
 
 

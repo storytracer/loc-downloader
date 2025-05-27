@@ -39,9 +39,9 @@ def metadata(url: str, output: Optional[str], limit: Optional[int]):
             # Use LCCN for filename if available and no output specified
             if not output:
                 if data.item.number_lccn:
-                    output = f"{data.item.number_lccn[0]}.json"
+                    output = f"{data.item.number_lccn[0]}.jsonl"
                 else:
-                    output = f"{identifier}.json"
+                    output = f"{identifier}.jsonl"
             
             api.save_metadata(data, output)
             click.echo(f"Metadata saved to: {output}")
@@ -52,7 +52,7 @@ def metadata(url: str, output: Optional[str], limit: Optional[int]):
             
             # Use collection slug for filename if no output specified
             if not output:
-                output = f"{identifier}.json"
+                output = f"{identifier}.jsonl"
             
             api.save_metadata(items, output)
             click.echo(f"Metadata for {len(items)} items saved to: {output}")

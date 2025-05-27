@@ -358,12 +358,17 @@ class LocAPI:
         output_path = Path(output_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        if isinstance(data, (ItemResponse, SearchResult)):
-            data_dict = data.model_dump()
-        elif isinstance(data, list) and all(isinstance(item, SearchResult) for item in data):
-            data_dict = [item.model_dump() for item in data]
-        else:
-            data_dict = data
-            
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(data_dict, f, indent=2, ensure_ascii=False)
+            if isinstance(data, (ItemResponse, SearchResult)):
+                # Single item - write as one line
+                f.write(json.dumps(data.model_dump(), ensure_ascii=False) + "\n")
+            elif isinstance(data, list):
+                # Multiple items - write each as a separate line
+                for item in data:
+                    if isinstance(item, SearchResult):
+                        f.write(json.dumps(item.model_dump(), ensure_ascii=False) + "\n")
+                    else:
+                        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            else:
+                # Fallback for other data types
+                f.write(json.dumps(data, ensure_ascii=False) + "\n")
