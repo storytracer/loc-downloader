@@ -31,6 +31,13 @@ def main():
     api.save_metadata(item, "metadata/item_metadata.jsonl")
     api.save_metadata(items, "metadata/collection_metadata.jsonl")
     print("Metadata saved successfully")
+    print()
+    
+    # Example 5: Stream collection metadata (memory efficient for large collections)
+    print("Example 5: Streaming collection metadata to JSONL")
+    collection_items = api.iter_collection_items("civil-war-maps", limit=100)
+    api.save_metadata_streaming(collection_items, "metadata/collection_streaming.jsonl", total=100)
+    print("Streaming metadata saved successfully")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ import logging
 import re
 import time
 import mimetypes
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Generator, Union
 from urllib.parse import urlparse, parse_qs
 import json
 from pathlib import Path
@@ -16,6 +16,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from .models import Item, ItemResponse, SearchResponse, SearchResult, Collection
 from .exceptions import LocAPIError, RateLimitError
+from .url_handler import LocURLHandler
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 
 class LocAPI:
-    BASE_URL = "https://www.loc.gov"
     
     RATE_LIMITS = {
         "newspapers": {
@@ -50,6 +50,7 @@ class LocAPI:
     }
     
     def __init__(self, max_workers: int = 10):
+        self.url_handler = LocURLHandler()
         self.sessions = {}
         
         # Create rate-limited sessions for each endpoint type
@@ -73,13 +74,13 @@ class LocAPI:
         self.max_workers = max_workers
         
     def _get_endpoint_type(self, url: str) -> str:
-        if "/newspapers/" in url:
+        if self.url_handler.is_newspapers_url(url):
             return "newspapers"
-        elif "/item/" in url:
+        elif self.url_handler.is_item_url(url):
             return "item"
-        elif "/resource/" in url:
+        elif self.url_handler.is_resource_url(url):
             return "resource"
-        elif "/collections/" in url:
+        elif self.url_handler.is_collection_url(url):
             return "collections"
         return "item"  # default
             
@@ -109,27 +110,16 @@ class LocAPI:
         return response.json()
                 
     def parse_url(self, url: str) -> Tuple[str, str]:
-        parsed = urlparse(url)
-        path = parsed.path
-        
-        item_match = re.search(r'/item/([^/]+)/?', path)
-        if item_match:
-            return "item", item_match.group(1)
-            
-        collection_match = re.search(r'/collections/([^/]+)/?', path)
-        if collection_match:
-            return "collection", collection_match.group(1)
-            
-        raise ValueError(f"URL {url} is not a valid item or collection URL")
+        return self.url_handler.parse_url(url)
         
     def get_item(self, item_id: str) -> ItemResponse:
-        url = f"{self.BASE_URL}/item/{item_id}/"
+        url = self.url_handler.get_item_url(item_id)
         data = self._make_request(url)
         return ItemResponse(**data)
         
     def get_collection_items(self, collection_name: str, 
                            limit: Optional[int] = None) -> List[SearchResult]:
-        url = f"{self.BASE_URL}/collections/{collection_name}/"
+        url = self.url_handler.get_collection_url(collection_name)
         
         all_results = []
         page = 1
@@ -169,7 +159,7 @@ class LocAPI:
         
     def _get_collection_with_faceting(self, collection_name: str,
                                     limit: Optional[int] = None) -> List[SearchResult]:
-        url = f"{self.BASE_URL}/collections/{collection_name}/"
+        url = self.url_handler.get_collection_url(collection_name)
         
         date_ranges = self._find_optimal_date_ranges(url)
         
@@ -245,6 +235,83 @@ class LocAPI:
                     ])
                     
         return sorted(ranges)
+    
+    def iter_collection_items(self, collection_name: str, 
+                            limit: Optional[int] = None) -> Generator[SearchResult, None, None]:
+        """Generator version of get_collection_items for streaming."""
+        url = self.url_handler.get_collection_url(collection_name)
+        
+        page = 1
+        per_page = 1000
+        items_yielded = 0
+        
+        initial_data = self._make_request(url, params={"c": per_page, "sp": page})
+        total_results = initial_data["pagination"]["total"]
+        
+        if total_results > 100000:
+            logger.info(f"Collection has {total_results} items, using date faceting")
+            yield from self._iter_collection_with_faceting(collection_name, limit)
+            return
+            
+        while True:
+            params = {
+                "c": per_page,
+                "sp": page,
+                "fa": "digitized:true"
+            }
+            
+            data = self._make_request(url, params=params)
+            response = SearchResponse(**data)
+            
+            for result in response.results:
+                if limit and items_yielded >= limit:
+                    return
+                    
+                yield result
+                items_yielded += 1
+                
+            if response.pagination.next is None:
+                break
+                
+            page += 1
+    
+    def _iter_collection_with_faceting(self, collection_name: str,
+                                     limit: Optional[int] = None) -> Generator[SearchResult, None, None]:
+        """Generator version of _get_collection_with_faceting for streaming."""
+        url = self.url_handler.get_collection_url(collection_name)
+        
+        date_ranges = self._find_optimal_date_ranges(url)
+        items_yielded = 0
+        
+        for start_year, end_year in date_ranges:
+            if limit and items_yielded >= limit:
+                break
+                
+            page = 1
+            per_page = 1000
+            
+            while True:
+                params = {
+                    "c": per_page,
+                    "sp": page,
+                    "fa": "digitized:true",
+                    "dates": f"{start_year}/{end_year}"
+                }
+                
+                data = self._make_request(url, params=params)
+                response = SearchResponse(**data)
+                
+                for result in response.results:
+                    if limit and items_yielded >= limit:
+                        return
+                        
+                    yield result
+                    items_yielded += 1
+                    
+                if response.pagination.next is None:
+                    break
+                    
+                page += 1
         
     def download_item_files(self, item_id: str, output_dir: str,
                            mimetype: Optional[str] = None) -> List[str]:
@@ -372,3 +439,16 @@ class LocAPI:
             else:
                 # Fallback for other data types
                 f.write(json.dumps(data, ensure_ascii=False) + "\n")
+    
+    def save_metadata_streaming(self, data_generator: Generator[SearchResult, None, None], 
+                              output_file: str, total: Optional[int] = None):
+        """Save metadata in streaming mode, writing each item as it's received."""
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(output_path, "w", encoding="utf-8") as f:
+            with tqdm(total=total, desc="Saving metadata") as pbar:
+                for item in data_generator:
+                    f.write(json.dumps(item.model_dump(), ensure_ascii=False) + "\n")
+                    f.flush()  # Ensure data is written immediately
+                    pbar.update(1)

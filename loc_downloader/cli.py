@@ -48,14 +48,20 @@ def metadata(url: str, output: Optional[str], limit: Optional[int]):
             
         elif url_type == "collection":
             click.echo(f"Fetching metadata for collection: {identifier}")
-            items = api.get_collection_items(identifier, limit=limit)
             
             # Use collection slug for filename if no output specified
             if not output:
                 output = f"{identifier}.jsonl"
             
-            api.save_metadata(items, output)
-            click.echo(f"Metadata for {len(items)} items saved to: {output}")
+            # Get total count for progress bar
+            collection_url = api.url_handler.get_collection_url(identifier)
+            initial_data = api._make_request(collection_url, params={"c": 1})
+            total = min(initial_data["pagination"]["total"], limit) if limit else initial_data["pagination"]["total"]
+            
+            # Use streaming to save metadata progressively
+            items_generator = api.iter_collection_items(identifier, limit=limit)
+            api.save_metadata_streaming(items_generator, output, total=total)
+            click.echo(f"Metadata saved to: {output}")
             
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
