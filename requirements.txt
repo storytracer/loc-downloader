@@ -1,0 +1,8 @@
+click
+requests
+requests-ratelimiter
+pydantic
+tqdm
+aiofiles
+httpx
+tenacity
