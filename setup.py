@@ -28,7 +28,7 @@ setup(
     install_requires=[
         "click>=8.0",
         "requests>=2.28",
-        "pyrate-limiter>=3.0",
+        "pyrate-limiter>=2.0.0,<3.0.0",
         "pydantic>=2.0",
         "tqdm>=4.65",
         "aiofiles>=23.0",
