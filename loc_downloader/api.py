@@ -532,16 +532,14 @@ class LocAPI:
     def _download_file(self, url: str, output_dir: Path, item_id: str) -> Optional[str]:
         session = self.sessions.get("resource", self.default_session)
         
-        response = session.get(url, stream=True, timeout=60)
+        response = session.get(url, timeout=60)
         response.raise_for_status()
         
         filename = self._get_filename_from_url(url, response.headers, item_id)
         filepath = output_dir / filename
         
         with open(filepath, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+            f.write(response.content)
                     
         return str(filepath)
             
