@@ -58,9 +58,13 @@ def metadata(url: str, output: Optional[str], limit: Optional[int]):
             initial_data = api._make_request(collection_url, params={"c": 1})
             total = min(initial_data["pagination"]["total"], limit) if limit else initial_data["pagination"]["total"]
             
-            # Use streaming to save metadata progressively
-            items_generator = api.iter_collection_items(identifier, limit=limit)
-            api.save_metadata_streaming(items_generator, output, total=total)
+            # Determine pages directory for resumability
+            output_path = Path(output)
+            pages_dir = output_path.parent / output_path.stem
+            
+            # Use page-based generator with resume capability
+            page_generator = api.iter_collection_pages(identifier, limit=limit, resume_dir=pages_dir)
+            api.save_metadata_resumable(page_generator, output, total=total)
             click.echo(f"Metadata saved to: {output}")
             
     except ValueError as e:

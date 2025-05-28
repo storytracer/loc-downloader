@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 class LocAPI:
     
+    PAGE_SIZE = 1000  # Default number of results per page
+    
     RATE_LIMITS = {
         "newspapers": {
             "per_second": 2,  # 20 per 10 seconds
@@ -123,7 +125,7 @@ class LocAPI:
         
         all_results = []
         page = 1
-        per_page = 1000
+        per_page = self.PAGE_SIZE
         
         initial_data = self._make_request(url, params={"c": per_page, "sp": page})
         total_results = initial_data["pagination"]["total"]
@@ -172,7 +174,7 @@ class LocAPI:
                     break
                     
                 page = 1
-                per_page = 1000
+                per_page = self.PAGE_SIZE
                 
                 while True:
                     params = {
@@ -236,13 +238,69 @@ class LocAPI:
                     
         return sorted(ranges)
     
+    def _check_existing_pages(self, resume_dir: Optional[Path], total_pages: int, year_range: Optional[str] = None) -> List[int]:
+        """Check which pages need to be downloaded based on existing files."""
+        if not resume_dir or not resume_dir.exists():
+            return list(range(1, total_pages + 1))
+        
+        existing_pages = set()
+        for page_file in resume_dir.glob("*.jsonl"):
+            try:
+                # Handle both simple page numbers and faceted page names
+                filename = page_file.stem
+                if "_" in filename and year_range:
+                    # Faceted page: year_range_0001
+                    # Only consider files that match the current year_range
+                    if filename.startswith(f"{year_range}_"):
+                        page_num = int(filename.split("_")[-1])
+                        existing_pages.add(page_num)
+                elif "_" not in filename and not year_range:
+                    # Simple page number (non-faceted)
+                    page_num = int(filename)
+                    existing_pages.add(page_num)
+            except ValueError:
+                continue
+        
+        pages_to_fetch = [p for p in range(1, total_pages + 1) if p not in existing_pages]
+        
+        if existing_pages:
+            logger.info(f"Found {len(existing_pages)} existing pages, need to fetch {len(pages_to_fetch)} more")
+        
+        return pages_to_fetch
+    
+    def _parse_date_facets(self, base_url: str) -> List[Dict[str, Any]]:
+        """Parse date facets from the API response."""
+        data = self._make_request(base_url, params={"fa": "digitized:true", "fo": "json"})
+        
+        date_facets = []
+        for facet in data.get("facets", []):
+            if facet.get("type") == "dates":
+                for filter_item in facet.get("filters", []):
+                    if filter_item.get("count", 0) > 0:
+                        # Extract year range from dates parameter
+                        link = filter_item.get("on", "")
+                        dates_match = re.search(r'dates=([^&]+)', link)
+                        if dates_match:
+                            year_range = dates_match.group(1).replace("/", "-")
+                        else:
+                            year_range = filter_item.get("term", "unknown")
+                        
+                        date_facets.append({
+                            "year_range": year_range,
+                            "count": filter_item.get("count", 0),
+                            "link": link
+                        })
+                break
+        
+        return date_facets
+    
     def iter_collection_items(self, collection_name: str, 
                             limit: Optional[int] = None) -> Generator[SearchResult, None, None]:
         """Generator version of get_collection_items for streaming."""
         url = self.url_handler.get_collection_url(collection_name)
         
         page = 1
-        per_page = 1000
+        per_page = self.PAGE_SIZE
         items_yielded = 0
         
         initial_data = self._make_request(url, params={"c": per_page, "sp": page})
@@ -275,6 +333,62 @@ class LocAPI:
                 
             page += 1
     
+    def iter_collection_pages(self, collection_name: str, 
+                            limit: Optional[int] = None,
+                            resume_dir: Optional[Path] = None) -> Generator[Tuple[int, List[SearchResult]], None, None]:
+        """Generator that yields (page_number, results) tuples for collection pages."""
+        url = self.url_handler.get_collection_url(collection_name)
+        per_page = self.PAGE_SIZE
+        
+        # Get total results
+        initial_data = self._make_request(url, params={"c": 1})
+        total_results = initial_data["pagination"]["total"]
+        
+        if total_results > 100000:
+            logger.info(f"Collection has {total_results} items, using date faceting")
+            yield from self._iter_collection_pages_with_faceting(collection_name, limit, resume_dir)
+            return
+        
+        # Calculate total pages
+        total_pages = (total_results + per_page - 1) // per_page
+        if limit:
+            max_pages = (limit + per_page - 1) // per_page
+            total_pages = min(total_pages, max_pages)
+        
+        # Check existing pages
+        pages_to_fetch = self._check_existing_pages(resume_dir, total_pages)
+        
+        if not pages_to_fetch:
+            logger.info("All pages already downloaded")
+            return
+        
+        logger.info(f"Downloading {len(pages_to_fetch)} pages")
+        
+        # Download missing pages
+        items_yielded = 0
+        for page in pages_to_fetch:
+            params = {
+                "c": per_page,
+                "sp": page,
+                "fa": "digitized:true"
+            }
+            
+            data = self._make_request(url, params=params)
+            response = SearchResponse(**data)
+            
+            page_results = []
+            for result in response.results:
+                if limit and items_yielded >= limit:
+                    if page_results:
+                        yield (page, page_results)
+                    return
+                
+                page_results.append(result)
+                items_yielded += 1
+            
+            if page_results:
+                yield (page, page_results)
+    
     def _iter_collection_with_faceting(self, collection_name: str,
                                      limit: Optional[int] = None) -> Generator[SearchResult, None, None]:
         """Generator version of _get_collection_with_faceting for streaming."""
@@ -288,7 +402,7 @@ class LocAPI:
                 break
                 
             page = 1
-            per_page = 1000
+            per_page = self.PAGE_SIZE
             
             while True:
                 params = {
@@ -312,6 +426,64 @@ class LocAPI:
                     break
                     
                 page += 1
+    
+    def _iter_collection_pages_with_faceting(self, collection_name: str,
+                                           limit: Optional[int] = None,
+                                           resume_dir: Optional[Path] = None) -> Generator[Tuple[int, List[SearchResult]], None, None]:
+        """Generator version for pages with date faceting."""
+        url = self.url_handler.get_collection_url(collection_name)
+        per_page = self.PAGE_SIZE
+        
+        # Get date facets
+        date_facets = self._parse_date_facets(url)
+        
+        # Create output directory structure for date facets
+        items_yielded = 0
+        
+        for facet in date_facets:
+            if limit and items_yielded >= limit:
+                break
+                
+            year_range = facet["year_range"]
+            facet_url = facet["link"]
+            
+            # Get total pages for this facet
+            facet_data = self._make_request(facet_url, params={"c": 1, "fo": "json"})
+            total_pages = (facet_data["pagination"]["total"] + per_page - 1) // per_page
+            
+            # Check existing pages for this facet (use resume_dir directly without subdirectory)
+            pages_to_fetch = self._check_existing_pages(resume_dir, total_pages, year_range) if resume_dir else list(range(1, total_pages + 1))
+            
+            # Download pages for this facet
+            for page in pages_to_fetch:
+                if limit and items_yielded >= limit:
+                    return
+                    
+                params = {
+                    "c": per_page,
+                    "sp": page,
+                    "fo": "json"
+                }
+                
+                data = self._make_request(facet_url, params=params)
+                response = SearchResponse(**data)
+                
+                page_results = []
+                for result in response.results:
+                    if limit and items_yielded >= limit:
+                        if page_results:
+                            # Use combined identifier for faceted pages
+                            page_id = f"{year_range}_{str(page).zfill(4)}"
+                            yield (page_id, page_results)
+                        return
+                        
+                    page_results.append(result)
+                    items_yielded += 1
+                
+                if page_results:
+                    # Use combined identifier for faceted pages
+                    page_id = f"{year_range}_{str(page).zfill(4)}"
+                    yield (page_id, page_results)
         
     def download_item_files(self, item_id: str, output_dir: str,
                            mimetype: Optional[str] = None) -> List[str]:
@@ -452,3 +624,70 @@ class LocAPI:
                     f.write(json.dumps(item.model_dump(), ensure_ascii=False) + "\n")
                     f.flush()  # Ensure data is written immediately
                     pbar.update(1)
+    
+    def save_metadata_resumable(self, page_generator: Generator[Tuple[Union[int, str], List[SearchResult]], None, None],
+                              output_file: str, total: Optional[int] = None):
+        """Save metadata with page-based resumability."""
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Create subdirectory for page files
+        pages_dir = output_path.parent / output_path.stem
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Count existing items for progress bar
+        existing_items = self._count_existing_items(pages_dir)
+        
+        # Save each page to a separate file
+        with tqdm(total=total, desc="Downloading metadata", initial=existing_items) as pbar:
+            for page_id, page_results in page_generator:
+                # Handle both numeric and string page IDs
+                if isinstance(page_id, int):
+                    page_file = pages_dir / f"{str(page_id).zfill(4)}.jsonl"
+                else:
+                    # For faceted pages with year ranges
+                    page_file = pages_dir / f"{page_id}.jsonl"
+                
+                # Save page results
+                with open(page_file, "w", encoding="utf-8") as f:
+                    for item in page_results:
+                        f.write(json.dumps(item.model_dump(), ensure_ascii=False) + "\n")
+                
+                pbar.update(len(page_results))
+        
+        # Merge all pages into final output file
+        logger.info("Merging page files into final output")
+        self._merge_page_files(pages_dir, output_path)
+    
+    def _merge_page_files(self, pages_dir: Path, output_file: Path):
+        """Merge individual page files into a single output file."""
+        page_files = sorted(pages_dir.glob("*.jsonl"))
+        
+        if not page_files:
+            logger.warning("No page files found to merge")
+            return
+        
+        with open(output_file, "w", encoding="utf-8") as out_f:
+            with tqdm(total=len(page_files), desc="Merging pages") as pbar:
+                for page_file in page_files:
+                    with open(page_file, "r", encoding="utf-8") as in_f:
+                        for line in in_f:
+                            out_f.write(line)
+                    pbar.update(1)
+        
+        logger.info(f"Merged {len(page_files)} pages into {output_file}")
+    
+    def _count_existing_items(self, pages_dir: Path) -> int:
+        """Count total items in existing page files."""
+        if not pages_dir.exists():
+            return 0
+        
+        count = 0
+        for page_file in pages_dir.glob("*.jsonl"):
+            try:
+                with open(page_file, 'r') as f:
+                    count += sum(1 for _ in f)
+            except Exception:
+                continue
+        
+        return count
