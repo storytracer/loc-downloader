@@ -74,17 +74,6 @@ class LocURLHandler:
             return resource_url
         return urljoin(self.base_url, resource_url)
     
-    def is_newspapers_url(self, url: str) -> bool:
-        """Check if URL is for newspapers/chroniclingamerica.
-        
-        Args:
-            url: The URL to check
-            
-        Returns:
-            True if this is a newspapers URL
-        """
-        return "newspapers" in url or "chroniclingamerica" in url
-    
     def is_item_url(self, url: str) -> bool:
         """Check if URL is for an item endpoint.
         

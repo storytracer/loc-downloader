@@ -29,11 +29,6 @@ class LocAPI:
     PAGE_SIZE = 1000  # Default number of results per page
     
     RATE_LIMITS = {
-        "newspapers": {
-            "per_second": 2,  # 20 per 10 seconds
-            "per_minute": 20,
-            "burst": 5
-        },
         "item": {
             "per_second": 1,  # 10 per 10 seconds
             "per_minute": 200,
@@ -76,9 +71,7 @@ class LocAPI:
         self.max_workers = max_workers
         
     def _get_endpoint_type(self, url: str) -> str:
-        if self.url_handler.is_newspapers_url(url):
-            return "newspapers"
-        elif self.url_handler.is_item_url(url):
+        if self.url_handler.is_item_url(url):
             return "item"
         elif self.url_handler.is_resource_url(url):
             return "resource"
