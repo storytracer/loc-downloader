@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 class LocAPI:
     
     PAGE_SIZE = 1000  # Default number of results per page
+    DEEP_PAGING_LIMIT = 100000  # Limit for deep paging collections
     
     RATE_LIMITS = {
         "item": {
@@ -123,7 +124,7 @@ class LocAPI:
         initial_data = self._make_request(url, params={"c": per_page, "sp": page})
         total_results = initial_data["pagination"]["total"]
         
-        if total_results > 100000:
+        if total_results > self.DEEP_PAGING_LIMIT:
             logger.info(f"Collection has {total_results} items, using date faceting")
             return self._get_collection_with_faceting(collection_name, limit)
             
@@ -211,13 +212,13 @@ class LocAPI:
             count = bucket.get("count", 0)
             value = bucket.get("value", "")
             
-            if count < 100000 and value:
+            if count < self.DEEP_PAGING_LIMIT and value:
                 year_match = re.match(r"(\d{4})/(\d{4})", value)
                 if year_match:
                     start_year = int(year_match.group(1))
                     end_year = int(year_match.group(2))
                     ranges.append((start_year, end_year))
-            elif count >= 100000 and value:
+            elif count >= self.DEEP_PAGING_LIMIT and value:
                 year_match = re.match(r"(\d{4})/(\d{4})", value)
                 if year_match:
                     start_year = int(year_match.group(1))
@@ -299,7 +300,7 @@ class LocAPI:
         initial_data = self._make_request(url, params={"c": per_page, "sp": page})
         total_results = initial_data["pagination"]["total"]
         
-        if total_results > 100000:
+        if total_results > self.DEEP_PAGING_LIMIT:
             logger.info(f"Collection has {total_results} items, using date faceting")
             yield from self._iter_collection_with_faceting(collection_name, limit)
             return
@@ -337,7 +338,7 @@ class LocAPI:
         initial_data = self._make_request(url, params={"c": 1})
         total_results = initial_data["pagination"]["total"]
         
-        if total_results > 100000:
+        if total_results > self.DEEP_PAGING_LIMIT:
             logger.info(f"Collection has {total_results} items, using date faceting")
             yield from self._iter_collection_pages_with_faceting(collection_name, limit, resume_dir)
             return
@@ -357,30 +358,96 @@ class LocAPI:
         
         logger.info(f"Downloading {len(pages_to_fetch)} pages")
         
-        # Download missing pages
-        items_yielded = 0
-        for page in pages_to_fetch:
+        # Download missing pages in parallel
+        yield from self._fetch_pages_parallel(url, pages_to_fetch, per_page, limit)
+    
+    def _fetch_pages_parallel(self, url: str, pages_to_fetch: List[int], 
+                             per_page: int, limit: Optional[int] = None) -> Generator[Tuple[int, List[SearchResult]], None, None]:
+        """Fetch multiple pages in parallel using ThreadPoolExecutor."""
+        def fetch_page(page_num: int) -> Tuple[int, List[SearchResult]]:
             params = {
                 "c": per_page,
-                "sp": page,
+                "sp": page_num,
                 "fa": "digitized:true"
             }
             
             data = self._make_request(url, params=params)
             response = SearchResponse(**data)
+            return (page_num, response.results)
+        
+        items_yielded = 0
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all page requests
+            future_to_page = {executor.submit(fetch_page, page): page for page in pages_to_fetch}
             
-            page_results = []
-            for result in response.results:
-                if limit and items_yielded >= limit:
+            # Process completed requests as they finish
+            for future in as_completed(future_to_page):
+                try:
+                    page_num, page_results = future.result()
+                    
+                    # Apply limit if specified
+                    if limit:
+                        remaining_items = limit - items_yielded
+                        if remaining_items <= 0:
+                            break
+                        if len(page_results) > remaining_items:
+                            page_results = page_results[:remaining_items]
+                    
+                    items_yielded += len(page_results)
+                    
                     if page_results:
-                        yield (page, page_results)
-                    return
-                
-                page_results.append(result)
-                items_yielded += 1
+                        yield (page_num, page_results)
+                        
+                except Exception as e:
+                    page_num = future_to_page[future]
+                    logger.error(f"Failed to fetch page {page_num}: {e}")
+    
+    def _fetch_facet_pages_parallel(self, facet_url: str, pages_to_fetch: List[int], 
+                                   per_page: int, year_range: str, 
+                                   limit: Optional[int] = None, 
+                                   items_yielded: int = 0) -> Generator[Tuple[str, List[SearchResult]], None, None]:
+        """Fetch multiple faceted pages in parallel using ThreadPoolExecutor."""
+        def fetch_page(page_num: int) -> Tuple[int, List[SearchResult]]:
+            params = {
+                "c": per_page,
+                "sp": page_num,
+                "fo": "json"
+            }
             
-            if page_results:
-                yield (page, page_results)
+            data = self._make_request(facet_url, params=params)
+            response = SearchResponse(**data)
+            return (page_num, response.results)
+        
+        local_items_yielded = 0
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all page requests
+            future_to_page = {executor.submit(fetch_page, page): page for page in pages_to_fetch}
+            
+            # Process completed requests as they finish
+            for future in as_completed(future_to_page):
+                try:
+                    page_num, page_results = future.result()
+                    
+                    # Apply limit if specified
+                    if limit:
+                        remaining_items = limit - items_yielded - local_items_yielded
+                        if remaining_items <= 0:
+                            break
+                        if len(page_results) > remaining_items:
+                            page_results = page_results[:remaining_items]
+                    
+                    local_items_yielded += len(page_results)
+                    
+                    if page_results:
+                        # Use combined identifier for faceted pages
+                        page_id = f"{year_range}_{str(page_num).zfill(4)}"
+                        yield (page_id, page_results)
+                        
+                except Exception as e:
+                    page_num = future_to_page[future]
+                    logger.error(f"Failed to fetch faceted page {page_num} for {year_range}: {e}")
     
     def _iter_collection_with_faceting(self, collection_name: str,
                                      limit: Optional[int] = None) -> Generator[SearchResult, None, None]:
@@ -422,7 +489,7 @@ class LocAPI:
     
     def _iter_collection_pages_with_faceting(self, collection_name: str,
                                            limit: Optional[int] = None,
-                                           resume_dir: Optional[Path] = None) -> Generator[Tuple[int, List[SearchResult]], None, None]:
+                                           resume_dir: Optional[Path] = None) -> Generator[Tuple[Union[int, str], List[SearchResult]], None, None]:
         """Generator version for pages with date faceting."""
         url = self.url_handler.get_collection_url(collection_name)
         per_page = self.PAGE_SIZE
@@ -447,36 +514,29 @@ class LocAPI:
             # Check existing pages for this facet (use resume_dir directly without subdirectory)
             pages_to_fetch = self._check_existing_pages(resume_dir, total_pages, year_range) if resume_dir else list(range(1, total_pages + 1))
             
-            # Download pages for this facet
-            for page in pages_to_fetch:
+            if not pages_to_fetch:
+                # Count existing items for this facet to update items_yielded
+                if resume_dir:
+                    for page_file in resume_dir.glob(f"{year_range}_*.jsonl"):
+                        try:
+                            with open(page_file, 'r') as f:
+                                items_yielded += sum(1 for _ in f)
+                        except Exception:
+                            continue
+                continue
+            
+            # Download pages for this facet in parallel
+            logger.info(f"Downloading {len(pages_to_fetch)} pages for year range {year_range}")
+            
+            # Use parallel fetching for this facet
+            for page_id, page_results in self._fetch_facet_pages_parallel(
+                facet_url, pages_to_fetch, per_page, year_range, limit, items_yielded
+            ):
+                items_yielded += len(page_results)
+                yield (page_id, page_results)
+                
                 if limit and items_yielded >= limit:
                     return
-                    
-                params = {
-                    "c": per_page,
-                    "sp": page,
-                    "fo": "json"
-                }
-                
-                data = self._make_request(facet_url, params=params)
-                response = SearchResponse(**data)
-                
-                page_results = []
-                for result in response.results:
-                    if limit and items_yielded >= limit:
-                        if page_results:
-                            # Use combined identifier for faceted pages
-                            page_id = f"{year_range}_{str(page).zfill(4)}"
-                            yield (page_id, page_results)
-                        return
-                        
-                    page_results.append(result)
-                    items_yielded += 1
-                
-                if page_results:
-                    # Use combined identifier for faceted pages
-                    page_id = f"{year_range}_{str(page).zfill(4)}"
-                    yield (page_id, page_results)
         
     def download_item_files(self, item_id: str, output_dir: str,
                            mimetype: Optional[str] = None) -> List[str]:

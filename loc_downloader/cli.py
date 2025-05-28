@@ -26,8 +26,9 @@ def main():
 @click.argument("url")
 @click.option("--output", "-o", help="Output file path")
 @click.option("--limit", "-l", type=int, help="Maximum number of items to fetch (collections only)")
-def metadata(url: str, output: Optional[str], limit: Optional[int]):
-    api = LocAPI()
+@click.option("--workers", "-w", default=10, type=int, help="Number of parallel workers for metadata fetching")
+def metadata(url: str, output: Optional[str], limit: Optional[int], workers: int):
+    api = LocAPI(max_workers=workers)
     
     try:
         url_type, identifier = api.parse_url(url)
